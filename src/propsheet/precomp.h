@@ -3,6 +3,8 @@
 
 #pragma once
 
+#define NOMINMAX
+
 // -- WARNING -- LOAD BEARING CODE --
 // This define ABSOLUTELY MUST be included (and equal to 1, or more specifically != 0)
 // prior to the import of Common Controls.
@@ -17,7 +19,6 @@
 #define DEFINE_CONSOLEV2_PROPERTIES
 #define INC_OLE2
 
-
 // This includes a lot of common headers needed by both the host and the propsheet
 // including: windows.h, winuser, ntstatus, assert, and the DDK
 #include "HostAndPropsheetIncludes.h"
@@ -26,9 +27,9 @@
 #include "LibraryIncludes.h"
 
 #include <windowsx.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <stddef.h>
+#include <cstdlib>
+#include <cstdio>
+#include <cstddef>
 #include <winbase.h>
 #include <winconp.h>
 #include <wingdi.h>
@@ -42,7 +43,7 @@
 
 #include <strsafe.h>
 #include <intsafe.h>
-#include <wchar.h>
+#include <cwchar>
 #include <shellapi.h>
 
 #include "strid.h"
@@ -52,7 +53,7 @@
 
 // This is currently bubbling up the source tree to our branch
 #ifndef WM_DPICHANGED_BEFOREPARENT
-#define WM_DPICHANGED_BEFOREPARENT      0x02E2
+#define WM_DPICHANGED_BEFOREPARENT 0x02E2
 #endif
 
 // When on a non-CJK machine using the raster font in a CJK codepage (e.g. "chcp 932"), the raster font is enumerated as

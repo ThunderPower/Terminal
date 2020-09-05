@@ -23,22 +23,18 @@ namespace Microsoft::Console::VirtualTerminal
     class InteractDispatch : public IInteractDispatch
     {
     public:
+        InteractDispatch(std::unique_ptr<ConGetSet> pConApi);
 
-        InteractDispatch(ConGetSet* const pConApi);
+        bool WriteInput(std::deque<std::unique_ptr<IInputEvent>>& inputEvents) override;
+        bool WriteCtrlKey(const KeyEvent& event) override;
+        bool WriteString(const std::wstring_view string) override;
+        bool WindowManipulation(const DispatchTypes::WindowManipulationType function,
+                                const gsl::span<const size_t> parameters) override; // DTTERM_WindowManipulation
+        bool MoveCursor(const size_t row, const size_t col) override;
 
-        ~InteractDispatch() = default;
+        bool IsVtInputEnabled() const override;
 
-        bool WriteInput(_In_ std::deque<std::unique_ptr<IInputEvent>>& inputEvents) override;
-        bool WriteCtrlC() override;
-        bool WriteString(_In_reads_(cch) const wchar_t* const pws, const size_t cch) override;
-        bool WindowManipulation(const DispatchTypes::WindowManipulationType uiFunction,
-                                _In_reads_(cParams) const unsigned short* const rgusParams,
-                                const size_t cParams) override; // DTTERM_WindowManipulation
-        bool MoveCursor(const unsigned int row,
-                        const unsigned int col) override;
     private:
-
         std::unique_ptr<ConGetSet> _pConApi;
-
     };
 }

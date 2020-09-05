@@ -14,7 +14,7 @@ Author(s):
 - Paul Campbell (paulcam) 18-Jun-2014
 
 Revision History:
-- Tranformed to header-only class so it can be included by multiple
+- Transformed to header-only class so it can be included by multiple
 unit testing projects in the codebase without a bunch of overhead.
 --*/
 
@@ -22,7 +22,6 @@ unit testing projects in the codebase without a bunch of overhead.
 
 #define VERIFY_SUCCESS_NTSTATUS(x) VERIFY_IS_TRUE(NT_SUCCESS(x))
 
-#include "precomp.h"
 #include "../host/globals.h"
 #include "../host/inputReadHandleData.h"
 #include "../buffer/out/CharRow.hpp"
@@ -31,7 +30,6 @@ unit testing projects in the codebase without a bunch of overhead.
 class CommonState
 {
 public:
-
     static const SHORT s_csWindowWidth = 80;
     static const SHORT s_csWindowHeight = 80;
     static const SHORT s_csBufferWidth = 80;
@@ -39,7 +37,7 @@ public:
 
     CommonState() :
         m_heap(GetProcessHeap()),
-        m_ntstatusTextBufferInfo(STATUS_FAIL_CHECK),
+        m_hrTextBufferInfo(E_FAIL),
         m_pFontInfo(nullptr),
         m_backupTextBufferInfo(),
         m_readHandle(nullptr)
@@ -82,23 +80,26 @@ public:
         }
     }
 
-    void PrepareGlobalScreenBuffer()
+    void PrepareGlobalScreenBuffer(const short viewWidth = s_csWindowWidth,
+                                   const short viewHeight = s_csWindowHeight,
+                                   const short bufferWidth = s_csBufferWidth,
+                                   const short bufferHeight = s_csBufferHeight)
     {
         CONSOLE_INFORMATION& gci = Microsoft::Console::Interactivity::ServiceLocator::LocateGlobals().getConsoleInformation();
         COORD coordWindowSize;
-        coordWindowSize.X = s_csWindowWidth;
-        coordWindowSize.Y = s_csWindowHeight;
+        coordWindowSize.X = viewWidth;
+        coordWindowSize.Y = viewHeight;
 
         COORD coordScreenBufferSize;
-        coordScreenBufferSize.X = s_csBufferWidth;
-        coordScreenBufferSize.Y = s_csBufferHeight;
+        coordScreenBufferSize.X = bufferWidth;
+        coordScreenBufferSize.Y = bufferHeight;
 
         UINT uiCursorSize = 12;
 
         THROW_IF_FAILED(SCREEN_INFORMATION::CreateInstance(coordWindowSize,
                                                            *m_pFontInfo,
                                                            coordScreenBufferSize,
-                                                           gci.GetDefaultAttributes(),
+                                                           TextAttribute{},
                                                            TextAttribute{ FOREGROUND_BLUE | FOREGROUND_INTENSITY | BACKGROUND_RED },
                                                            uiCursorSize,
                                                            &gci.pCurrentScreenBuffer));
@@ -122,7 +123,7 @@ public:
         delete gci.pInputBuffer;
     }
 
-    void PrepareCookedReadData()
+    void PrepareCookedReadData(const std::string_view initialData = {})
     {
         CONSOLE_INFORMATION& gci = Microsoft::Console::Interactivity::ServiceLocator::LocateGlobals().getConsoleInformation();
         auto* readData = new COOKED_READ_DATA(gci.pInputBuffer,
@@ -133,7 +134,7 @@ public:
                                               0,
                                               nullptr,
                                               L"",
-                                              {});
+                                              initialData);
         gci.SetCookedReadData(readData);
     }
 
@@ -144,35 +145,40 @@ public:
         gci.SetCookedReadData(nullptr);
     }
 
-    void PrepareNewTextBufferInfo()
+    void PrepareNewTextBufferInfo(const bool useDefaultAttributes = false,
+                                  const short bufferWidth = s_csBufferWidth,
+                                  const short bufferHeight = s_csBufferHeight)
     {
         CONSOLE_INFORMATION& gci = Microsoft::Console::Interactivity::ServiceLocator::LocateGlobals().getConsoleInformation();
         COORD coordScreenBufferSize;
-        coordScreenBufferSize.X = s_csBufferWidth;
-        coordScreenBufferSize.Y = s_csBufferHeight;
+        coordScreenBufferSize.X = bufferWidth;
+        coordScreenBufferSize.Y = bufferHeight;
 
         UINT uiCursorSize = 12;
+
+        auto initialAttributes = useDefaultAttributes ? TextAttribute{} :
+                                                        TextAttribute{ FOREGROUND_BLUE | FOREGROUND_GREEN | BACKGROUND_RED | BACKGROUND_INTENSITY };
 
         m_backupTextBufferInfo.swap(gci.pCurrentScreenBuffer->_textBuffer);
         try
         {
             std::unique_ptr<TextBuffer> textBuffer = std::make_unique<TextBuffer>(coordScreenBufferSize,
-                                                                                  TextAttribute{FOREGROUND_BLUE | FOREGROUND_GREEN | BACKGROUND_RED | BACKGROUND_INTENSITY},
+                                                                                  initialAttributes,
                                                                                   uiCursorSize,
                                                                                   gci.pCurrentScreenBuffer->GetRenderTarget());
             if (textBuffer.get() == nullptr)
             {
-                m_ntstatusTextBufferInfo = STATUS_NO_MEMORY;
+                m_hrTextBufferInfo = E_OUTOFMEMORY;
             }
             else
             {
-                m_ntstatusTextBufferInfo = STATUS_SUCCESS;
+                m_hrTextBufferInfo = S_OK;
             }
             gci.pCurrentScreenBuffer->_textBuffer.swap(textBuffer);
         }
         catch (...)
         {
-            m_ntstatusTextBufferInfo = NTSTATUS_FROM_HRESULT(wil::ResultFromCaughtException());
+            m_hrTextBufferInfo = wil::ResultFromCaughtException();
         }
     }
 
@@ -222,15 +228,14 @@ public:
         textBuffer.GetCursor().SetYPosition(cRowsToFill);
     }
 
-    [[nodiscard]]
-    NTSTATUS GetTextBufferInfoInitResult()
+    [[nodiscard]] HRESULT GetTextBufferInfoInitResult()
     {
-        return m_ntstatusTextBufferInfo;
+        return m_hrTextBufferInfo;
     }
 
 private:
     HANDLE m_heap;
-    NTSTATUS m_ntstatusTextBufferInfo;
+    HRESULT m_hrTextBufferInfo;
     FontInfo* m_pFontInfo;
     std::unique_ptr<TextBuffer> m_backupTextBufferInfo;
     std::unique_ptr<INPUT_READ_HANDLE_DATA> m_readHandle;
@@ -241,7 +246,11 @@ private:
         // 9 characters, 6 spaces. 15 total
         // か = \x304b
         // き = \x304d
-        const PCWSTR pwszText = L"AB" L"\x304b\x304b" L"C" L"\x304d\x304d" L"DE      ";
+        const PCWSTR pwszText = L"AB"
+                                L"\x304b\x304b"
+                                L"C"
+                                L"\x304d\x304d"
+                                L"DE      ";
         const size_t length = wcslen(pwszText);
 
         std::vector<DbcsAttribute> attrs(length, DbcsAttribute());
@@ -288,12 +297,12 @@ private:
         }
     }
 
-    void FillBisect(ROW *pRow)
+    void FillBisect(ROW* pRow)
     {
         const CONSOLE_INFORMATION& gci = Microsoft::Console::Interactivity::ServiceLocator::LocateGlobals().getConsoleInformation();
         // length 80 string of text with bisecting characters at the beginning and end.
         // positions of き(\x304d) are at 0, 27-28, 39-40, 67-68, 79
-        PWCHAR pwszText =
+        auto pwszText =
             L"\x304d"
             L"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
             L"\x304d\x304d"

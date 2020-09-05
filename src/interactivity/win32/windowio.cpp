@@ -23,11 +23,16 @@
 #pragma hdrstop
 
 using namespace Microsoft::Console::Interactivity::Win32;
+using namespace Microsoft::Console::VirtualTerminal;
 using Microsoft::Console::Interactivity::ServiceLocator;
 // For usage with WM_SYSKEYDOWN message processing.
 // See https://msdn.microsoft.com/en-us/library/windows/desktop/ms646286(v=vs.85).aspx
 // Bit 29 is whether ALT was held when the message was posted.
 #define WM_SYSKEYDOWN_ALT_PRESSED (0x20000000)
+
+// This magic flag is "documented" at https://msdn.microsoft.com/en-us/library/windows/desktop/ms646301(v=vs.85).aspx
+// "If the high-order bit is 1, the key is down; otherwise, it is up."
+static constexpr short KeyPressed{ gsl::narrow_cast<short>(0x8000) };
 
 // ----------------------------
 // Helpers
@@ -94,9 +99,9 @@ VOID SetConsoleWindowOwner(const HWND hwnd, _Inout_opt_ ConsoleProcessHandle* pP
 
     // Comment out this line to enable UIA tree to be visible until UIAutomationCore.dll can support our scenario.
     LOG_IF_FAILED(ServiceLocator::LocateConsoleControl<Microsoft::Console::Interactivity::Win32::ConsoleControl>()
-        ->Control(ConsoleControl::ControlType::ConsoleSetWindowOwner,
-                  &ConsoleOwner,
-                  sizeof(ConsoleOwner)));
+                      ->Control(ConsoleControl::ControlType::ConsoleSetWindowOwner,
+                                &ConsoleOwner,
+                                sizeof(ConsoleOwner)));
 }
 
 // ----------------------------
@@ -123,7 +128,20 @@ bool HandleTerminalMouseEvent(const COORD cMousePosition,
     // Virtual terminal input mode
     if (IsInVirtualTerminalInputMode())
     {
-        fWasHandled = gci.terminalMouseInput.HandleMouse(cMousePosition, uiButton, sModifierKeystate, sWheelDelta);
+        const TerminalInput::MouseButtonState state{
+            WI_IsFlagSet(GetKeyState(VK_LBUTTON), KeyPressed),
+            WI_IsFlagSet(GetKeyState(VK_MBUTTON), KeyPressed),
+            WI_IsFlagSet(GetKeyState(VK_RBUTTON), KeyPressed)
+        };
+
+        // GH#6401: VT applications should be able to receive mouse events from outside the
+        // terminal buffer. This is likely to happen when the user drags the cursor offscreen.
+        // We shouldn't throw away perfectly good events when they're offscreen, so we just
+        // clamp them to be within the range [(0, 0), (W, H)].
+        auto clampedPosition{ cMousePosition };
+        const auto clampViewport{ gci.GetActiveOutputBuffer().GetViewport().ToOrigin() };
+        clampViewport.Clamp(clampedPosition);
+        fWasHandled = gci.GetActiveInputBuffer()->GetTerminalInput().HandleMouse(clampedPosition, uiButton, sModifierKeystate, sWheelDelta, state);
     }
 
     return fWasHandled;
@@ -358,7 +376,6 @@ void HandleKeyEvent(const HWND hWnd,
                     ServiceLocator::LocateConsoleWindow<Window>()->ChangeWindowOpacity(opacityDelta);
                     return;
                 }
-
             }
         }
     }
@@ -475,7 +492,7 @@ BOOL HandleSysKeyEvent(const HWND hWnd, const UINT Message, const WPARAM wParam,
     if (VirtualKeyCode == VK_ESCAPE &&
         bCtrlDown && !(GetKeyState(VK_MENU) & KEY_PRESSED) && !(GetKeyState(VK_SHIFT) & KEY_PRESSED))
     {
-        return TRUE;    // call DefWindowProc
+        return TRUE; // call DefWindowProc
     }
 
     // check for alt-f4
@@ -485,12 +502,11 @@ BOOL HandleSysKeyEvent(const HWND hWnd, const UINT Message, const WPARAM wParam,
     }
 
     if (WI_IsFlagClear(lParam, WM_SYSKEYDOWN_ALT_PRESSED))
-    {   // we're iconic
+    { // we're iconic
         // Check for ENTER while iconic (restore accelerator).
         if (VirtualKeyCode == VK_RETURN)
         {
-
-            return TRUE;    // call DefWindowProc
+            return TRUE; // call DefWindowProc
         }
         else
         {
@@ -521,16 +537,16 @@ BOOL HandleSysKeyEvent(const HWND hWnd, const UINT Message, const WPARAM wParam,
                 return FALSE;
             }
 
-            return TRUE;    // call DefWindowProc
+            return TRUE; // call DefWindowProc
         }
 
         if (VirtualKeyCode == VK_ESCAPE)
         {
-            return TRUE;    // call DefWindowProc
+            return TRUE; // call DefWindowProc
         }
         if (VirtualKeyCode == VK_TAB)
         {
-            return TRUE;    // call DefWindowProc
+            return TRUE; // call DefWindowProc
         }
     }
 
@@ -539,8 +555,7 @@ BOOL HandleSysKeyEvent(const HWND hWnd, const UINT Message, const WPARAM wParam,
     return FALSE;
 }
 
-[[nodiscard]]
-static HRESULT _AdjustFontSize(const SHORT delta) noexcept
+[[nodiscard]] static HRESULT _AdjustFontSize(const SHORT delta) noexcept
 {
     auto& globals = ServiceLocator::LocateGlobals();
     auto& screenInfo = globals.getConsoleInformation().GetActiveOutputBuffer();
@@ -633,24 +648,30 @@ BOOL HandleMouseEvent(const SCREEN_INFORMATION& ScreenInfo,
         short sDelta = 0;
         if (Message == WM_MOUSEWHEEL)
         {
-            short sWheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
-            // For most devices, we'll get mouse events as multiples of
-            // WHEEL_DELTA, where WHEEL_DELTA represents a single scroll unit
-            // But sometimes, things like trackpads will scroll in finer
-            // measurements. In this case, the VT mouse scrolling wouldn't work.
-            // So if that happens, ensure we scroll at least one time.
-            if (abs(sWheelDelta) < WHEEL_DELTA)
-            {
-                sDelta = sWheelDelta < 0 ? -1 : 1;
-            }
-            else
-            {
-                sDelta = sWheelDelta / WHEEL_DELTA;
-            }
+            sDelta = GET_WHEEL_DELTA_WPARAM(wParam);
         }
 
         if (HandleTerminalMouseEvent(MousePosition, Message, GET_KEYSTATE_WPARAM(wParam), sDelta))
         {
+            // GH#6401: Capturing the mouse ensures that we get drag/release events
+            // even if the user moves outside the window.
+            // HandleTerminalMouseEvent returns false if the terminal's not in VT mode,
+            // so capturing/releasing here should not impact other console mouse event
+            // consumers.
+            switch (Message)
+            {
+            case WM_LBUTTONDOWN:
+            case WM_MBUTTONDOWN:
+            case WM_RBUTTONDOWN:
+                SetCapture(ServiceLocator::LocateConsoleWindow()->GetWindowHandle());
+                break;
+            case WM_LBUTTONUP:
+            case WM_MBUTTONUP:
+            case WM_RBUTTONUP:
+                ReleaseCapture();
+                break;
+            }
+
             return FALSE;
         }
     }
@@ -779,7 +800,6 @@ BOOL HandleMouseEvent(const SCREEN_INFORMATION& ScreenInfo,
                     MousePosition = wordBounds.second;
                     // update both ends of the selection since we may have adjusted the anchor in some circumstances.
                     pSelection->AdjustSelection(wordBounds.first, wordBounds.second);
-
                 }
                 catch (...)
                 {
@@ -804,8 +824,8 @@ BOOL HandleMouseEvent(const SCREEN_INFORMATION& ScreenInfo,
                         Telemetry::Instance().LogQuickEditCopyRawUsed();
                     }
                     // If the ALT key is held, also select HTML as well as plain text.
-                    bool const fAlsoSelectHtml = WI_IsFlagSet(GetKeyState(VK_MENU), KEY_PRESSED);
-                    Clipboard::Instance().Copy(fAlsoSelectHtml);
+                    bool const fAlsoCopyFormatting = WI_IsFlagSet(GetKeyState(VK_MENU), KEY_PRESSED);
+                    Clipboard::Instance().Copy(fAlsoCopyFormatting);
                 }
                 else if (gci.Flags & CONSOLE_QUICK_EDIT_MODE)
                 {
@@ -917,7 +937,7 @@ BOOL HandleMouseEvent(const SCREEN_INFORMATION& ScreenInfo,
             EventFlags);
         EventsWritten = static_cast<ULONG>(gci.pInputBuffer->Write(std::move(mouseEvent)));
     }
-    catch(...)
+    catch (...)
     {
         LOG_HR(wil::ResultFromCaughtException());
         EventsWritten = 0;
@@ -947,7 +967,6 @@ LRESULT CALLBACK DialogHookProc(int nCode, WPARAM /*wParam*/, LPARAM lParam)
         {
             if (msg.message != WM_CHAR && msg.message != WM_DEADCHAR && msg.message != WM_SYSCHAR && msg.message != WM_SYSDEADCHAR)
             {
-
                 // don't store key info if dialog box input
                 if (GetWindowLongPtrW(msg.hwnd, GWLP_HWNDPARENT) == 0)
                 {
@@ -962,7 +981,7 @@ LRESULT CALLBACK DialogHookProc(int nCode, WPARAM /*wParam*/, LPARAM lParam)
 
 // Routine Description:
 // - This routine gets called by the console input thread to set up the console window.
-NTSTATUS InitWindowsSubsystem(_Out_ HHOOK * phhook)
+NTSTATUS InitWindowsSubsystem(_Out_ HHOOK* phhook)
 {
     CONSOLE_INFORMATION& gci = ServiceLocator::LocateGlobals().getConsoleInformation();
     ConsoleProcessHandle* ProcessData = gci.ProcessHandleList.FindProcessInList(ConsoleProcessList::ROOT_PROCESS_ID);
@@ -1061,7 +1080,7 @@ DWORD WINAPI ConsoleInputThreadProcWin32(LPVOID /*lpParameter*/)
         {
             DispatchMessageW(&msg);
         }
-        // do this so that alt-tab works while journalling
+        // do this so that alt-tab works while journaling
         else if (msg.message == WM_SYSKEYDOWN && msg.wParam == VK_TAB && WI_IsFlagSet(msg.lParam, WM_SYSKEYDOWN_ALT_PRESSED))
         {
             // alt is really down
